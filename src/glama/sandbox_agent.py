@@ -69,36 +69,115 @@ def dump_url_w3m_style(url: str, max_chars: int = 2500) -> str:
     dumper.feed(text)
     return dumper.get_text()[:max_chars]
 
+def get_weather_forecast(location: str) -> dict:
+    """Zero-dependency 24h hourly weather forecast via Open-Meteo (no API key, VPN-safe)."""
+    loc_clean = location.strip()
+    for strip_word in ("weather", "forecast", "hourly", "24hr", "24-hour", "in ", "for "):
+        loc_clean = loc_clean.replace(strip_word, " ").replace(strip_word.title(), " ")
+    loc_clean = " ".join(loc_clean.split()).strip(",") or location.strip()
+    try:
+        geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean)
+        with urllib.request.urlopen(geo_url, timeout=6) as r:
+            g = json.loads(r.read())
+        if not g.get("results") and "," in loc_clean:
+            geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean.split(",")[0].strip())
+            with urllib.request.urlopen(geo_url, timeout=6) as r:
+                g = json.loads(r.read())
+        if not g.get("results"):
+            return {"error": f"Location not found: {loc_clean}"}
+        loc = g["results"][0]
+        lat, lon = loc["latitude"], loc["longitude"]
+        name = f"{loc.get('name')}, {loc.get('admin1', '')} ({loc.get('country_code', '')})"
+        wx_url = (
+            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+            "&current=temperature_2m,precipitation,wind_speed_10m"
+            "&hourly=temperature_2m,precipitation_probability,precipitation"
+            "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=2"
+        )
+        with urllib.request.urlopen(wx_url, timeout=6) as r:
+            w = json.loads(r.read())
+        cur = w.get("current", {})
+        cur_time = cur.get("time", "")
+        hourly = w.get("hourly", {})
+        times = hourly.get("time", [])
+        temps = hourly.get("temperature_2m", [])
+        pops = hourly.get("precipitation_probability", [])
+        start_idx = 0
+        for idx, t in enumerate(times):
+            if t >= cur_time[:13]:
+                start_idx = idx
+                break
+        rows = [
+            f"{times[i]}: {temps[i]}°F ({pops[i]}% rain chance)"
+            for i in range(start_idx, min(start_idx + 24, len(times)))
+        ]
+        return {
+            "location": name,
+            "current": {
+                "temp_f": cur.get("temperature_2m"),
+                "wind_mph": cur.get("wind_speed_10m"),
+                "precip_mm": cur.get("precipitation")
+            },
+            "next_24h_hourly": rows
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 def search_web_readonly(query: str, max_results: int = 5) -> list[dict]:
     results = []
+    q_low = query.lower()
+    if any(w in q_low for w in ("weather", "forecast", "temperature", "rain")):
+        wx = get_weather_forecast(query)
+        if "next_24h_hourly" in wx:
+            results.append({"source": "Open-Meteo Live 24h Hourly Forecast", "weather": wx})
+    # 1. Try Bing RSS (works reliably over VPNs without CAPTCHAs)
     try:
-        data = urllib.parse.urlencode({"q": query}).encode("utf-8")
-        req = urllib.request.Request("https://lite.duckduckgo.com/lite/", data=data, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            html_txt = r.read(64 * 1024).decode("utf-8", errors="replace")
-        dumper = _W3MStyleTextDumper()
-        dumper.feed(html_txt)
-        lines = [l for l in dumper.get_text().splitlines() if len(l) > 25 and not l.startswith("DuckDuckGo")]
-        for l in lines[:max_results]:
-            results.append({"snippet": l[:240]})
+        import xml.etree.ElementTree as ET
+        b_url = "https://www.bing.com/search?format=rss&setmkt=en-US&q=" + urllib.parse.quote(query)
+        req = urllib.request.Request(b_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            root = ET.fromstring(r.read())
+        for item in root.findall(".//item")[:max_results]:
+            results.append({
+                "title": item.findtext("title"),
+                "url": item.findtext("link"),
+                "snippet": item.findtext("description")
+            })
     except Exception:
         pass
+    # 2. Fallback to Wikipedia OpenSearch if still empty
     if not results:
         try:
             q_enc = urllib.parse.quote(query)
             wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q_enc}&utf8=&format=json&srlimit={max_results}"
             req = urllib.request.Request(wiki_url, headers={"User-Agent": "glama-w3m-reader/0.1"})
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with urllib.request.urlopen(req, timeout=6) as r:
                 wdata = json.loads(r.read())
             for item in wdata.get("query", {}).get("search", []):
                 dumper = _W3MStyleTextDumper()
                 dumper.feed(item.get("snippet", ""))
-                results.append({"title": item.get("title"), "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_")), "snippet": dumper.get_text()})
+                results.append({
+                    "title": item.get("title"),
+                    "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_")),
+                    "snippet": dumper.get_text()
+                })
         except Exception as e:
             results.append({"error": str(e)})
     return results
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather_forecast",
+            "description": "Get current weather and 24-hour hourly temperature & rain forecast for any city/location.",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string", "description": "City name, e.g. Redmond or Seattle"}},
+                "required": ["location"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -214,7 +293,9 @@ def safe_resolve(rel_path: str) -> pathlib.Path:
 
 def exec_sandbox_tool(name: str, args: dict) -> str:
     try:
-        if name == "web_search_text":
+        if name == "get_weather_forecast":
+            return json.dumps(get_weather_forecast(str(args.get("location", "Redmond"))))
+        elif name == "web_search_text":
             return json.dumps({"query": args.get("query", ""), "results": search_web_readonly(str(args.get("query", "")))})
         elif name == "web_fetch_text":
             u = str(args.get("url", "")).strip()
