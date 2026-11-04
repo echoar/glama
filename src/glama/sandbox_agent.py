@@ -12,6 +12,131 @@ SANDBOX_ROOT = pathlib.Path(os.environ.get("OLLAMA_SANDBOX_ROOT", ".")).resolve(
 
 BLOCKED_PATTERNS = (".env", "secret", "token", "password", "credential", "id_rsa", ".pem", ".key", "pg_service")
 
+
+import html.parser, ipaddress, socket, urllib.parse
+
+class _W3MStyleTextDumper(html.parser.HTMLParser):
+    """Pure-stdlib w3m-dump equivalent: strips scripts/styles and extracts readable text."""
+    SKIP_TAGS = {"script", "style", "noscript", "svg", "head", "meta", "link", "iframe"}
+    BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "article", "section"}
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self.chunks = []
+
+    def handle_starttag(self, tag, attrs):
+        t = tag.lower()
+        if t in self.SKIP_TAGS:
+            self._skip_depth += 1
+        elif t in self.BLOCK_TAGS and self._skip_depth == 0:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self.SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            txt = " ".join(data.split())
+            if txt:
+                self.chunks.append(txt + " ")
+
+    def get_text(self) -> str:
+        raw = "".join(self.chunks)
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        return "\n".join(lines)
+
+def _assert_safe_public_url(url: str) -> str:
+    """SSRF guard: allow only http/https and block private/loopback/meshnet/link-local IPs."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise PermissionError("Only public http/https URLs are permitted")
+    host = parsed.hostname.lower()
+    if host in ("localhost", "0.0.0.0") or host.endswith((".local", ".internal", ".nord", ".lan")):
+        raise PermissionError("Local/internal hostnames are blocked by SSRF guard")
+    for info in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), socket.AF_INET):
+        ip_str = info[4][0]
+        ip_obj = ipaddress.ip_address(ip_str)
+        if (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj in ipaddress.ip_network("100.64.0.0/10")
+        ):
+            raise PermissionError(f"Non-public IP ({ip_str}) blocked by SSRF guard")
+    return url
+
+def dump_url_w3m_style(url: str, max_chars: int = 2500) -> str:
+    """Fetch a public URL using w3m -dump if installed, else pure-stdlib HTMLParser text dumper."""
+    _assert_safe_public_url(url)
+    if shutil.which("w3m"):
+        try:
+            out = subprocess.check_output(
+                ["w3m", "-dump", "-cols", "100", url],
+                timeout=10,
+                stderr=subprocess.DEVNULL
+            ).decode("utf-8", errors="replace")
+            return out[:max_chars]
+        except Exception:
+            pass
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; glama-w3m-reader/0.1)"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw_bytes = resp.read(96 * 1024)
+        ctype = resp.headers.get("Content-Type", "").lower()
+    text = raw_bytes.decode("utf-8", errors="replace")
+    if "json" in ctype or "plain" in ctype:
+        return text[:max_chars]
+    dumper = _W3MStyleTextDumper()
+    dumper.feed(text)
+    return dumper.get_text()[:max_chars]
+
+def search_web_readonly(query: str, max_results: int = 5) -> list[dict]:
+    """Zero-dependency DuckDuckGo Lite + Wikipedia text search ($0, no API keys)."""
+    results = []
+    try:
+        data = urllib.parse.urlencode({"q": query}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://lite.duckduckgo.com/lite/",
+            data=data,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            html_txt = r.read(64 * 1024).decode("utf-8", errors="replace")
+        dumper = _W3MStyleTextDumper()
+        dumper.feed(html_txt)
+        lines = [l for l in dumper.get_text().splitlines() if len(l) > 25 and not l.startswith("DuckDuckGo")]
+        for l in lines[:max_results]:
+            results.append({"snippet": l[:240]})
+    except Exception:
+        pass
+    if not results:
+        try:
+            q_enc = urllib.parse.quote(query)
+            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q_enc}&utf8=&format=json&srlimit={max_results}"
+            req = urllib.request.Request(wiki_url, headers={"User-Agent": "glama-w3m-reader/0.1"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                wdata = json.loads(r.read())
+            for item in wdata.get("query", {}).get("search", []):
+                dumper = _W3MStyleTextDumper()
+                dumper.feed(item.get("snippet", ""))
+                results.append({
+                    "title": item.get("title"),
+                    "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_")),
+                    "snippet": dumper.get_text()
+                })
+        except Exception as e:
+            results.append({"error": str(e)})
+    return results
+
 TOOLS = [
     {
         "type": "function",
@@ -57,6 +182,30 @@ TOOLS = [
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Substring to search for"}},
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search_text",
+            "description": "Search the web (DuckDuckGo Lite / Wikipedia) and return plain-text snippets (read-only).",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch_text",
+            "description": "Fetch a public https:// URL in w3m-dump plain-text mode (SSRF-guarded, read-only).",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "Public https:// URL to read"}},
+                "required": ["url"]
             }
         }
     }
@@ -107,6 +256,15 @@ def exec_sandbox_tool(name: str, args: dict) -> str:
                 if len(hits) >= 20:
                     break
             return json.dumps({"query": q, "matches": hits})
+        elif name == "web_search_text":
+            if os.environ.get("GLAMA_ENABLE_WEB", "1") == "0":
+                return json.dumps({"error": "Web access disabled by GLAMA_ENABLE_WEB=0"})
+            return json.dumps({"query": args.get("query", ""), "results": search_web_readonly(str(args.get("query", "")))})
+        elif name == "web_fetch_text":
+            if os.environ.get("GLAMA_ENABLE_WEB", "1") == "0":
+                return json.dumps({"error": "Web access disabled by GLAMA_ENABLE_WEB=0"})
+            u = str(args.get("url", "")).strip()
+            return json.dumps({"url": u, "text": dump_url_w3m_style(u)})
         return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
