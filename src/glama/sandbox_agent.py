@@ -79,8 +79,8 @@ def get_weather_forecast(location: str) -> dict:
         geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean)
         with urllib.request.urlopen(geo_url, timeout=6) as r:
             g = json.loads(r.read())
-        if not g.get("results") and "," in loc_clean:
-            geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean.split(",")[0].strip())
+        if not g.get("results") and ("," in loc_clean or len(loc_clean.split()) >= 2):
+            geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean.split(",")[0].split()[0].strip())
             with urllib.request.urlopen(geo_url, timeout=6) as r:
                 g = json.loads(r.read())
         if not g.get("results"):
@@ -364,7 +364,7 @@ SYSTEM_PROMPT = (
     "2) web_fetch_text(url) -> fetches any public https:// webpage in w3m plain-text mode. "
     "3) get_system_headroom() -> checks GPU VRAM and disk space. "
     "4) list_workspace_files, read_workspace_file, search_workspace_text -> read-only workspace access. "
-    "Commands: /new (reset session), /models, /model 8b|coder|3b, /vram, /help. "
+    "Treat short follow-ups (like 'how about now?' or 'yes') as natural conversation continuations, never as slash commands. "
     "IMPORTANT: You CAN search the internet using web_search_text and read webpages using web_fetch_text! Reply tersely."
 )
 

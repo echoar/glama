@@ -41,6 +41,9 @@ def main():
                 sender_id = (msg.get("from") or {}).get("id")
                 chat_id = (msg.get("chat") or {}).get("id")
                 text = (msg.get("text") or "").strip()
+                reply_to = ((msg.get("reply_to_message") or {}).get("text") or "").strip()
+                if reply_to and not text.startswith("/"):
+                    text = f"[Replying to: {reply_to[:400]}]\n{text}"
                 if sender_id not in allowed_ids or not text:
                     continue
                 if text in ("/new", "/clear", "/reset"):
