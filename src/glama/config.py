@@ -146,3 +146,7 @@ def select_oom_safe_model(requested: str) -> str:
             return cand
 
     raise RuntimeError(f"[OOM-Guard] Only {avail_mb} MiB usable memory (after {RESERVE_MEM_MB} MiB safety reserve). No installed model fits.")
+
+# Permission mode: 'readonly' (default), 'workspace-write' (markdown/text writes inside sandbox), or 'custom'
+PERMISSION_MODE = _ENV.get("GLAMA_PERMISSION_MODE", "readonly").strip().lower()
+ALLOW_CUSTOM_TOOLS = _ENV.get("GLAMA_ALLOW_CUSTOM_TOOLS", "0").strip() == "1"

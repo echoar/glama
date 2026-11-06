@@ -33,5 +33,13 @@ export TELEGRAM_ALLOWED_USER_IDS="<your-numeric-telegram-user-id>"
 glama-bot
 ```
 
+
+## Security & Permission Modes (`GLAMA_PERMISSION_MODE`)
+
+By default, `glama` starts in strict **`readonly`** mode. Permission levels are controlled exclusively by the host OS environment/`.env` (and config/script files are blocked inside `safe_resolve`, so the model or a prompt injection can never escalate its own permissions):
+
+- **`GLAMA_PERMISSION_MODE=readonly` (Default):** Write tools are not registered in the tool schema and raise `PermissionError` at the Python handler layer. Only read-only tools are active.
+- **`GLAMA_PERMISSION_MODE=workspace-write` (Opt-in):** Registers `write_workspace_file` confined strictly inside `OLLAMA_SANDBOX_ROOT` and restricted to data/note extensions (`.md`, `.txt`, `.json`, `.csv`)—executable/script extensions (`.py`, `.sh`, `.ps1`, `.vbs`, `.env`) remain hard-blocked.
+
 ## License
 MIT

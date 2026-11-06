@@ -293,6 +293,26 @@ TOOLS = [
     }
 ]
 
+WRITE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "write_workspace_file",
+        "description": "Write or update a markdown/text/json note inside the sandbox root (only enabled when GLAMA_PERMISSION_MODE=workspace-write).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "rel_path": {"type": "string", "description": "Relative file path inside sandbox (.md, .txt, .json, .csv only)"},
+                "content": {"type": "string", "description": "Text content to write"}
+            },
+            "required": ["rel_path", "content"]
+        }
+    }
+}
+
+PERMISSION_MODE = os.environ.get("GLAMA_PERMISSION_MODE", "readonly").strip().lower()
+if PERMISSION_MODE == "workspace-write":
+    TOOLS.append(WRITE_TOOL_SCHEMA)
+
 def get_available_mem_mb() -> int:
     if IS_WINDOWS and shutil.which("nvidia-smi"):
         try:
@@ -329,7 +349,7 @@ def safe_resolve(rel_path: str) -> pathlib.Path:
     if not str(p).startswith(str(WORKSPACE)):
         raise PermissionError("Path outside workspace sandbox")
     low = p.name.lower()
-    if any(k in low for k in (".env", "secret", "token", "password", "credential", "openclaw.json", "pg_service")):
+    if any(k in low for k in (".env", "config.json", "secret", "token", "password", "credential", "openclaw.json", "pg_service", ".py", ".sh", ".ps1", ".vbs", ".cmd", ".bat")):
         raise PermissionError("Sensitive file blocked by sandbox")
     return p
 
@@ -379,6 +399,16 @@ def exec_sandbox_tool(name: str, args: dict) -> str:
                 if len(hits) >= 20:
                     break
             return json.dumps({"query": q, "matches": hits})
+        elif name == "write_workspace_file":
+            if os.environ.get("GLAMA_PERMISSION_MODE", "readonly").strip().lower() != "workspace-write":
+                raise PermissionError("Write blocked: GLAMA_PERMISSION_MODE is locked to 'readonly'")
+            target = safe_resolve(args.get("rel_path", ""))
+            if target.suffix.lower() not in (".md", ".txt", ".json", ".csv"):
+                raise PermissionError("Only .md, .txt, .json, and .csv files are permitted in workspace-write mode")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            content = str(args.get("content", ""))[:65536]
+            target.write_text(content, encoding="utf-8")
+            return json.dumps({"written": str(target.relative_to(WORKSPACE)), "bytes": len(content)})
         return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
