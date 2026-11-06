@@ -446,8 +446,14 @@ SYSTEM_PROMPT = (
 def run_micro_agent(prompt: str, model: str = DEFAULT_MODEL, max_turns: int = 4) -> dict:
     ensure_ollama()
     avail_mb = get_available_mem_mb()
-    if avail_mb < 5000 and model in ("qwen3:8b", "gemma4:26b", "qwen3:32b"):
-        raise RuntimeError(f"[OOM-Guard] Free VRAM/RAM ({avail_mb} MB) < 5000 MB needed for tool-calling model {model}.")
+    requested_model = model
+    if avail_mb < 5200 and model in ("qwen3:8b", "gemma4:26b", "qwen3:32b"):
+        if avail_mb >= 4800:
+            model = "qwen2.5-coder:7b"
+        elif avail_mb >= 2100:
+            model = "qwen2.5:3b"
+        else:
+            raise RuntimeError(f"[OOM-Guard] Free VRAM/RAM ({avail_mb} MB) < 2100 MB minimum.")
     t0 = time.time()
     user_prompt = f"/no_think\n{prompt}" if model.startswith("qwen3") else prompt
     messages = [
