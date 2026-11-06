@@ -69,12 +69,13 @@ def dump_url_w3m_style(url: str, max_chars: int = 2500) -> str:
     dumper.feed(text)
     return dumper.get_text()[:max_chars]
 
-def get_weather_forecast(location: str) -> dict:
-    """Zero-dependency 24h hourly weather forecast via Open-Meteo (no API key, VPN-safe)."""
-    loc_clean = location.strip()
-    for strip_word in ("weather", "forecast", "hourly", "24hr", "24-hour", "in ", "for "):
+def get_weather_forecast(location: str = "") -> dict:
+    """Zero-dependency 24h hourly + 7-day daily weather forecast via Open-Meteo."""
+    default_loc = os.environ.get("GLAMA_DEFAULT_LOCATION", "New York")
+    loc_clean = (location or default_loc).strip()
+    for strip_word in ("weather", "forecast", "hourly", "24hr", "24-hour", "weekly", "week", "today", "in ", "for "):
         loc_clean = loc_clean.replace(strip_word, " ").replace(strip_word.title(), " ")
-    loc_clean = " ".join(loc_clean.split()).strip(",") or location.strip()
+    loc_clean = " ".join(loc_clean.split()).strip(",") or default_loc
     try:
         geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean)
         with urllib.request.urlopen(geo_url, timeout=6) as r:
@@ -92,7 +93,8 @@ def get_weather_forecast(location: str) -> dict:
             f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
             "&current=temperature_2m,precipitation,wind_speed_10m"
             "&hourly=temperature_2m,precipitation_probability,precipitation"
-            "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=2"
+            "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max"
+            "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=7"
         )
         with urllib.request.urlopen(wx_url, timeout=6) as r:
             w = json.loads(r.read())
@@ -107,9 +109,19 @@ def get_weather_forecast(location: str) -> dict:
             if t >= cur_time[:13]:
                 start_idx = idx
                 break
-        rows = [
+        hourly_rows = [
             f"{times[i]}: {temps[i]}°F ({pops[i]}% rain chance)"
             for i in range(start_idx, min(start_idx + 24, len(times)))
+        ]
+        daily = w.get("daily", {})
+        d_dates = daily.get("time", [])
+        d_max = daily.get("temperature_2m_max", [])
+        d_min = daily.get("temperature_2m_min", [])
+        d_pop = daily.get("precipitation_probability_max", [])
+        d_sum = daily.get("precipitation_sum", [])
+        daily_rows = [
+            f"{d_dates[i]}: High {d_max[i]}°F / Low {d_min[i]}°F | {d_pop[i]}% rain chance ({d_sum[i]} mm)"
+            for i in range(len(d_dates))
         ]
         return {
             "location": name,
@@ -118,7 +130,8 @@ def get_weather_forecast(location: str) -> dict:
                 "wind_mph": cur.get("wind_speed_10m"),
                 "precip_mm": cur.get("precipitation")
             },
-            "next_24h_hourly": rows
+            "next_7_days_daily": daily_rows,
+            "next_24h_hourly": hourly_rows
         }
     except Exception as e:
         return {"error": str(e)}
@@ -129,40 +142,39 @@ def search_web_readonly(query: str, max_results: int = 5) -> list[dict]:
     if any(w in q_low for w in ("weather", "forecast", "temperature", "rain")):
         wx = get_weather_forecast(query)
         if "next_24h_hourly" in wx:
-            results.append({"source": "Open-Meteo Live 24h Hourly Forecast", "weather": wx})
-    # 1. Try Bing RSS (works reliably over VPNs without CAPTCHAs)
+            results.append({"source": "Open-Meteo Live 24h & 7-Day Forecast", "weather": wx})
+    # 1. Google News RSS search (VPN-friendly, current dates/events/news, zero CAPTCHAs)
     try:
         import xml.etree.ElementTree as ET
-        b_url = "https://www.bing.com/search?format=rss&setmkt=en-US&q=" + urllib.parse.quote(query)
-        req = urllib.request.Request(b_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        g_url = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=" + urllib.parse.quote(query)
+        req = urllib.request.Request(g_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=6) as r:
             root = ET.fromstring(r.read())
         for item in root.findall(".//item")[:max_results]:
             results.append({
                 "title": item.findtext("title"),
-                "url": item.findtext("link"),
-                "snippet": item.findtext("description")
+                "pubDate": item.findtext("pubDate"),
+                "url": item.findtext("link")
             })
     except Exception:
         pass
-    # 2. Fallback to Wikipedia OpenSearch if still empty
-    if not results:
-        try:
-            q_enc = urllib.parse.quote(query)
-            wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q_enc}&utf8=&format=json&srlimit={max_results}"
-            req = urllib.request.Request(wiki_url, headers={"User-Agent": "glama-w3m-reader/0.1"})
-            with urllib.request.urlopen(req, timeout=6) as r:
-                wdata = json.loads(r.read())
-            for item in wdata.get("query", {}).get("search", []):
-                dumper = _W3MStyleTextDumper()
-                dumper.feed(item.get("snippet", ""))
-                results.append({
-                    "title": item.get("title"),
-                    "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_")),
-                    "snippet": dumper.get_text()
-                })
-        except Exception as e:
-            results.append({"error": str(e)})
+    # 2. Wikipedia OpenSearch for encyclopedic/reference facts
+    try:
+        q_enc = urllib.parse.quote(query)
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q_enc}&utf8=&format=json&srlimit=3"
+        req = urllib.request.Request(wiki_url, headers={"User-Agent": "glama-w3m-reader/0.1"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            wdata = json.loads(r.read())
+        for item in wdata.get("query", {}).get("search", []):
+            dumper = _W3MStyleTextDumper()
+            dumper.feed(item.get("snippet", ""))
+            results.append({
+                "title": item.get("title"),
+                "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_")),
+                "snippet": dumper.get_text()
+            })
+    except Exception:
+        pass
     return results
 
 TOOLS = [
@@ -365,7 +377,8 @@ SYSTEM_PROMPT = (
     "3) get_system_headroom() -> checks GPU VRAM and disk space. "
     "4) list_workspace_files, read_workspace_file, search_workspace_text -> read-only workspace access. "
     "Treat short follow-ups (like 'how about now?' or 'yes') as natural conversation continuations, never as slash commands. "
-    "IMPORTANT: You CAN search the internet using web_search_text and read webpages using web_fetch_text! Reply tersely."
+    f"Current date: {time.strftime('%A, %B %d, %Y')}. "
+    "IMPORTANT: You CAN search the internet using web_search_text and get 24h+7d weather via get_weather_forecast. Combine search results with your own knowledge when answering calendar/holiday/general questions. Reply tersely."
 )
 
 def run_micro_agent(prompt: str, model: str = DEFAULT_MODEL, max_turns: int = 4) -> dict:
