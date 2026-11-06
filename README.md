@@ -41,26 +41,39 @@ Permission levels are controlled exclusively by the host OS environment/`.env` (
 
 ---
 
-## Quickstart (macOS, Windows, Linux)
+## Installation & Quickstart (macOS, Windows, Linux)
 
+### Option 1: One-Line Installer (`uv` / `pipx` / `pip` directe from GitHub)
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/echoar/glama/main/install.sh | sh
+glama --setup
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/echoar/glama/main/install.ps1 | iex
+glama --setup
+```
+
+### Option 2: Direct `uv` / `pipx` / `pip` (No Clone Needed)
+
+```bash
+# Run instantly without installing via uvx:
+uvx --from git+https://github.com/echoar/glama.git glama "Check free VRAM/RAM headroom"
+
+# Or install globally as CLI tools (glama, glama-query, glama-bot, glama-setup):
+uv tool install git+https://github.com/echoar/glama.git
+# (or: pipx install git+https://github.com/echoar/glama.git)
+```
+
+### Option 3: Local Editable Clone
 ```bash
 git clone https://github.com/echoar/glama.git
 cd glama
 pip install -e .
-
-# 1. Inspect usable VRAM/RAM and auto-discovered Ollama models
-glama-query --list-models
-
-# 2. Run the read-only tool micro-agent (qwen3:8b)
-glama "Check free VRAM/RAM headroom and 24h weather forecast"
-
-# 3. Run a single-shot OOM-safe query (SQL, code, SPEAR gate)
-glama-query "Write a PostgreSQL query joining campaigns and metrics..."
-
-# 4. Launch the standalone $0 Telegram Bot
-export TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
-export TELEGRAM_ALLOWED_USER_IDS="123456789"
-glama-bot
+glama --setup
 ```
 
 ### Telegram Bot Commands (`glama-bot`)

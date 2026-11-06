@@ -495,7 +495,12 @@ if __name__ == "__main__":
     p.add_argument("prompt", nargs="?", default="Check system headroom and read the first 10 lines of IDENTITY.md.")
     p.add_argument("-m", "--model", default=DEFAULT_MODEL)
     p.add_argument("--json", action="store_true", help="Emit full JSON trace")
+    p.add_argument("--setup", action="store_true", help="Run interactive hardware & model setup wizard")
     args = p.parse_args()
+    if args.setup:
+        from .setup_wizard import run_setup_wizard
+        run_setup_wizard()
+        return
     out = run_micro_agent(args.prompt, model=args.model)
     if args.json:
         print(json.dumps(out, indent=2))

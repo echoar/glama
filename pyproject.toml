@@ -15,3 +15,4 @@ dependencies = []
 glama = "glama.sandbox_agent:main"
 glama-query = "glama.local_query:main"
 glama-bot = "glama.telegram_bot:main"
+glama-setup = "glama.setup_wizard:run_setup_wizard"
