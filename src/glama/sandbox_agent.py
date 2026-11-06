@@ -177,7 +177,37 @@ def search_web_readonly(query: str, max_results: int = 5) -> list[dict]:
         pass
     return results
 
+
+SKILLS_DIR = pathlib.Path(os.environ.get("GLAMA_SKILLS_DIR", str(WORKSPACE / "skills"))).resolve()
+
+def list_available_skills() -> list[str]:
+    if not SKILLS_DIR.exists():
+        return []
+    return sorted(f.stem for f in SKILLS_DIR.glob("*.md"))
+
+def load_skill_text(skill_name: str) -> str:
+    if not SKILLS_DIR.exists():
+        return "No skills directory found."
+    safe_name = pathlib.Path(skill_name).stem
+    target = (SKILLS_DIR / f"{safe_name}.md").resolve()
+    if not target.exists() or not str(target).startswith(str(SKILLS_DIR)):
+        return f"Skill '{safe_name}' not found. Available: {', '.join(list_available_skills())}"
+    return target.read_text(encoding="utf-8", errors="replace")[:2000]
+
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "use_skill",
+            "description": "Load a specialized step-by-step skill playbook by name (e.g. sql-spear, web-brief).",
+            "parameters": {
+                "type": "object",
+                "properties": {"skill_name": {"type": "string", "description": "Name of the skill to load"}},
+                "required": ["skill_name"]
+            }
+        }
+    },
+
     {
         "type": "function",
         "function": {
@@ -305,7 +335,9 @@ def safe_resolve(rel_path: str) -> pathlib.Path:
 
 def exec_sandbox_tool(name: str, args: dict) -> str:
     try:
-        if name == "get_weather_forecast":
+        if name == "use_skill":
+            return json.dumps({"skill": args.get("skill_name"), "instructions": load_skill_text(str(args.get("skill_name", "")))})
+        elif name == "get_weather_forecast":
             return json.dumps(get_weather_forecast(str(args.get("location", "Redmond"))))
         elif name == "web_search_text":
             return json.dumps({"query": args.get("query", ""), "results": search_web_readonly(str(args.get("query", "")))})
@@ -377,7 +409,7 @@ SYSTEM_PROMPT = (
     "3) get_system_headroom() -> checks GPU VRAM and disk space. "
     "4) list_workspace_files, read_workspace_file, search_workspace_text -> read-only workspace access. "
     "Treat short follow-ups (like 'how about now?' or 'yes') as natural conversation continuations, never as slash commands. "
-    f"Current date: {time.strftime('%A, %B %d, %Y')}. "
+    f"Current date: {time.strftime('%A, %B %d, %Y')}. Available skills (load via use_skill tool when relevant): {', '.join(list_available_skills()) or 'none'}. "
     "IMPORTANT: You CAN search the internet using web_search_text and get 24h+7d weather via get_weather_forecast. Combine search results with your own knowledge when answering calendar/holiday/general questions. Reply tersely."
 )
 
