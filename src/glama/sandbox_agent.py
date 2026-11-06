@@ -194,7 +194,86 @@ def load_skill_text(skill_name: str) -> str:
         return f"Skill '{safe_name}' not found. Available: {', '.join(list_available_skills())}"
     return target.read_text(encoding="utf-8", errors="replace")[:2000]
 
+
+def get_machine_diagnostics() -> dict:
+    """100% read-only machine info: GPU temp/fan/power, top RAM processes, and disk space."""
+    info = {"os": platform.platform(), "available_vram_or_ram_mb": get_available_mem_mb()}
+    if IS_WINDOWS and shutil.which("nvidia-smi"):
+        try:
+            nv = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,temperature.gpu,fan.speed,power.draw,memory.used,memory.free", "--format=csv,noheader"],
+                timeout=3
+            ).decode("utf-8", "replace").strip()
+            info["gpu"] = nv
+        except Exception:
+            pass
+    if IS_WINDOWS:
+        try:
+            out = subprocess.check_output(["powershell", "-NoProfile", "-Command", "Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 8 Name, @{N='MB';E={[math]::Round($_.WorkingSet64/1MB,0)}} | ConvertTo-Json -Compress"], timeout=5).decode("utf-8", "replace").strip()
+            info["top_ram_processes"] = json.loads(out)
+        except Exception:
+            pass
+    else:
+        try:
+            out = subprocess.check_output(["ps", "-Ao", "comm,rss", "-r"], timeout=4).decode("utf-8", "replace").splitlines()[1:9]
+            info["top_ram_processes"] = [line.strip() for line in out]
+        except Exception:
+            pass
+    drives = {}
+    for d in (["C:\\", "D:\\"] if IS_WINDOWS else [str(pathlib.Path.home())]):
+        if os.path.exists(d):
+            total, used, free = shutil.disk_usage(d)
+            drives[d] = {"free_gb": round(free / (1024**3), 2), "total_gb": round(total / (1024**3), 1)}
+    info["drives"] = drives
+    return info
+
+def read_feed_readonly(source: str = "hackernews") -> list[dict]:
+    """Read-only feed reader: 'hackernews', 'reddit:<subreddit>', or public RSS URL."""
+    s = source.strip()
+    if s.lower() in ("hn", "hackernews", "hacker news"):
+        url = "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=8"
+        req = urllib.request.Request(url, headers={"User-Agent": "glama-reader/0.1"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        return [{"title": h.get("title"), "points": h.get("points"), "url": h.get("url")} for h in data.get("hits", [])[:8]]
+    if s.lower().startswith("reddit:"):
+        sub = s.split(":", 1)[1].strip().lstrip("r/").lstrip("/")
+        url = f"https://www.reddit.com/r/{urllib.parse.quote(sub)}/hot.json?limit=6"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; glama-reader/0.1)"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read())
+        return [{"title": c["data"].get("title"), "score": c["data"].get("score"), "url": c["data"].get("url")} for c in data.get("data", {}).get("children", [])[:6]]
+    if s.startswith(("http://", "https://")):
+        _assert_safe_public_url(s)
+        import xml.etree.ElementTree as ET
+        req = urllib.request.Request(s, headers={"User-Agent": "Mozilla/5.0 (compatible; glama-reader/0.1)"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            root = ET.fromstring(r.read(64 * 1024))
+        return [{"title": i.findtext("title"), "link": i.findtext("link")} for i in root.findall(".//item")[:8]]
+    return search_web_readonly(s)
+
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_machine_diagnostics",
+            "description": "Read-only check of GPU temp/fan/power, top RAM-consuming processes, and disk free space.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_feed_readonly",
+            "description": "Read top stories from 'hackernews', 'reddit:<subreddit>', or a public RSS URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {"source": {"type": "string", "description": "'hackernews', 'reddit:LocalLLaMA', or RSS URL"}},
+                "required": ["source"]
+            }
+        }
+    },
+
     {
         "type": "function",
         "function": {
@@ -355,7 +434,11 @@ def safe_resolve(rel_path: str) -> pathlib.Path:
 
 def exec_sandbox_tool(name: str, args: dict) -> str:
     try:
-        if name == "use_skill":
+        if name == "get_machine_diagnostics":
+            return json.dumps(get_machine_diagnostics())
+        elif name == "read_feed_readonly":
+            return json.dumps(read_feed_readonly(str(args.get("source", "hackernews"))))
+        elif name == "use_skill":
             return json.dumps({"skill": args.get("skill_name"), "instructions": load_skill_text(str(args.get("skill_name", "")))})
         elif name == "get_weather_forecast":
             return json.dumps(get_weather_forecast(str(args.get("location", "Redmond"))))
