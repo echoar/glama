@@ -13,7 +13,7 @@ IS_WINDOWS = platform.system() == "Windows"
 DEFAULT_MODEL = "qwen3:8b"
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
-WORKSPACE = pathlib.Path(os.environ.get("OLLAMA_SANDBOX_ROOT", ".")).resolve()
+WORKSPACE = (pathlib.Path.home() / ".openclaw" / "workspace").resolve()
 
 class _W3MStyleTextDumper(html.parser.HTMLParser):
     SKIP_TAGS = {"script", "style", "noscript", "svg", "head", "meta", "link", "iframe"}
@@ -70,34 +70,62 @@ def dump_url_w3m_style(url: str, max_chars: int = 2500) -> str:
     return dumper.get_text()[:max_chars]
 
 def get_weather_forecast(location: str = "") -> dict:
-    """Zero-dependency 24h hourly + 7-day daily weather forecast via Open-Meteo."""
-    default_loc = os.environ.get("GLAMA_DEFAULT_LOCATION", "New York")
+    """Live weather forecast via wttr.in (with Open-Meteo fallback)."""
+    default_loc = os.environ.get("GLAMA_DEFAULT_LOCATION", "Redmond, WA")
     loc_clean = (location or default_loc).strip()
     for strip_word in ("weather", "forecast", "hourly", "24hr", "24-hour", "weekly", "week", "today", "in ", "for "):
         loc_clean = loc_clean.replace(strip_word, " ").replace(strip_word.title(), " ")
     loc_clean = " ".join(loc_clean.split()).strip(",") or default_loc
     try:
+        import requests
+        headers = {"User-Agent": "curl/8.0"}
+        # Fast, reliable primary: wttr.in JSON format (VPN-friendly, zero SSL stalls)
+        w_url = f"https://wttr.in/{urllib.parse.quote(loc_clean)}?format=j1"
+        try:
+            r = requests.get(w_url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                cur = data.get("current_condition", [{}])[0]
+                area = data.get("nearest_area", [{}])[0]
+                area_name = area.get("areaName", [{}])[0].get("value", loc_clean)
+                region = area.get("region", [{}])[0].get("value", "")
+                country = area.get("country", [{}])[0].get("value", "")
+                forecast_days = []
+                for d in data.get("weather", [])[:3]:
+                    forecast_days.append(f"{d.get('date')}: High {d.get('maxtempF')}°F / Low {d.get('mintempF')}°F | {d.get('hourly', [{}])[4].get('weatherDesc', [{}])[0].get('value', 'Clear')}")
+                return {
+                    "location": f"{area_name}, {region} ({country})",
+                    "current": {
+                        "temp_f": cur.get("temp_F"),
+                        "feels_like_f": cur.get("FeelsLikeF"),
+                        "condition": cur.get("weatherDesc", [{}])[0].get("value", ""),
+                        "humidity": f"{cur.get('humidity')}%",
+                        "wind_mph": f"{cur.get('windspeedMiles')} mph {cur.get('winddir16Point')}"
+                    },
+                    "next_3_days": forecast_days
+                }
+        except Exception:
+            pass
+
+        # Fallback: Open-Meteo
         geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean)
-        with urllib.request.urlopen(geo_url, timeout=6) as r:
-            g = json.loads(r.read())
+        try:
+            g = requests.get(geo_url, headers=headers, timeout=5).json()
+        except Exception:
+            g = {}
         if not g.get("results") and ("," in loc_clean or len(loc_clean.split()) >= 2):
             geo_url = "https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=" + urllib.parse.quote(loc_clean.split(",")[0].split()[0].strip())
-            with urllib.request.urlopen(geo_url, timeout=6) as r:
-                g = json.loads(r.read())
+            try:
+                g = requests.get(geo_url, headers=headers, timeout=5).json()
+            except Exception:
+                g = {}
         if not g.get("results"):
             return {"error": f"Location not found: {loc_clean}"}
         loc = g["results"][0]
         lat, lon = loc["latitude"], loc["longitude"]
         name = f"{loc.get('name')}, {loc.get('admin1', '')} ({loc.get('country_code', '')})"
-        wx_url = (
-            f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-            "&current=temperature_2m,precipitation,wind_speed_10m"
-            "&hourly=temperature_2m,precipitation_probability,precipitation"
-            "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max"
-            "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=7"
-        )
-        with urllib.request.urlopen(wx_url, timeout=6) as r:
-            w = json.loads(r.read())
+        wx_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,precipitation,wind_speed_10m&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto"
+        w = requests.get(wx_url, headers=headers, timeout=5).json()
         cur = w.get("current", {})
         cur_time = cur.get("time", "")
         hourly = w.get("hourly", {})
@@ -372,26 +400,6 @@ TOOLS = [
     }
 ]
 
-WRITE_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "write_workspace_file",
-        "description": "Write or update a markdown/text/json note inside the sandbox root (only enabled when GLAMA_PERMISSION_MODE=workspace-write).",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "rel_path": {"type": "string", "description": "Relative file path inside sandbox (.md, .txt, .json, .csv only)"},
-                "content": {"type": "string", "description": "Text content to write"}
-            },
-            "required": ["rel_path", "content"]
-        }
-    }
-}
-
-PERMISSION_MODE = os.environ.get("GLAMA_PERMISSION_MODE", "readonly").strip().lower()
-if PERMISSION_MODE == "workspace-write":
-    TOOLS.append(WRITE_TOOL_SCHEMA)
-
 def get_available_mem_mb() -> int:
     if IS_WINDOWS and shutil.which("nvidia-smi"):
         try:
@@ -428,7 +436,7 @@ def safe_resolve(rel_path: str) -> pathlib.Path:
     if not str(p).startswith(str(WORKSPACE)):
         raise PermissionError("Path outside workspace sandbox")
     low = p.name.lower()
-    if any(k in low for k in (".env", "config.json", "secret", "token", "password", "credential", "openclaw.json", "pg_service", ".py", ".sh", ".ps1", ".vbs", ".cmd", ".bat")):
+    if any(k in low for k in (".env", "secret", "token", "password", "credential", "openclaw.json", "pg_service")):
         raise PermissionError("Sensitive file blocked by sandbox")
     return p
 
@@ -482,16 +490,6 @@ def exec_sandbox_tool(name: str, args: dict) -> str:
                 if len(hits) >= 20:
                     break
             return json.dumps({"query": q, "matches": hits})
-        elif name == "write_workspace_file":
-            if os.environ.get("GLAMA_PERMISSION_MODE", "readonly").strip().lower() != "workspace-write":
-                raise PermissionError("Write blocked: GLAMA_PERMISSION_MODE is locked to 'readonly'")
-            target = safe_resolve(args.get("rel_path", ""))
-            if target.suffix.lower() not in (".md", ".txt", ".json", ".csv"):
-                raise PermissionError("Only .md, .txt, .json, and .csv files are permitted in workspace-write mode")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            content = str(args.get("content", ""))[:65536]
-            target.write_text(content, encoding="utf-8")
-            return json.dumps({"written": str(target.relative_to(WORKSPACE)), "bytes": len(content)})
         return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -515,7 +513,7 @@ def ensure_ollama():
             pass
 
 SYSTEM_PROMPT = (
-    "You are glama, an OOM-safe read-only sandboxed micro-agent with LIVE headless internet search and URL reading tools! "
+    "You are @glama_bot, an OOM-safe read-only sandboxed micro-agent with LIVE headless internet search and URL reading tools! "
     "Your tools are: "
     "1) web_search_text(query) -> searches the internet (DuckDuckGo Lite / Wikipedia) and returns plain-text results. "
     "2) web_fetch_text(url) -> fetches any public https:// webpage in w3m plain-text mode. "
@@ -584,12 +582,7 @@ if __name__ == "__main__":
     p.add_argument("prompt", nargs="?", default="Check system headroom and read the first 10 lines of IDENTITY.md.")
     p.add_argument("-m", "--model", default=DEFAULT_MODEL)
     p.add_argument("--json", action="store_true", help="Emit full JSON trace")
-    p.add_argument("--setup", action="store_true", help="Run interactive hardware & model setup wizard")
     args = p.parse_args()
-    if args.setup:
-        from .setup_wizard import run_setup_wizard
-        run_setup_wizard()
-        return
     out = run_micro_agent(args.prompt, model=args.model)
     if args.json:
         print(json.dumps(out, indent=2))
