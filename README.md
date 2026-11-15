@@ -76,7 +76,13 @@ pip install -e .
 glama --setup
 ```
 
-### Telegram Bot Commands (`glama-bot`)
+### Telegram Bot Commands & 0-Token Voice Pipeline (`glama-bot`)
+- **Voice-In (Automatic on any Voice Note):** Send any Telegram voice note -> transcribed locally via `faster-whisper` (`base.en` CPU `int8`, 0 MB GPU VRAM, 0 USD) and routed through the active local model.
+- **Voice-Out (`/voice`, `/speak`, `/tts`):**
+  - Swipe-reply `/voice` to any message (or send `/voice` alone) to read it aloud as a native Telegram Opus `.ogg` voice bubble (`edge-tts` neural voice with automatic 100% offline Windows SAPI / macOS `say` fallback).
+  - `/voice <prompt>`: Run `<prompt>` and reply with both text and a voice bubble.
+  - `/voice on | auto | off`: Set voice output mode (`off` = on-demand default, `auto` = voice-in gets voice-out, `on` = always send voice).
+  - Install optional voice extras with: `pip install "glama[voice]"`
 - `/new` (or `/clear`): Reset rolling session history and start a fresh session
 - `/models`: List all locally installed Ollama models and disk sizes
 - `/model <8b|coder|3b|name>`: Switch active local model on the fly
